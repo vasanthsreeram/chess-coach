@@ -53,6 +53,7 @@ const st = {
   showBest: true,
   // invite-link game against another person; null for bot games
   online: null as Connection | null,
+  joining: false,
   onlineErr: '',
   vsFriend: false,
 };
@@ -63,6 +64,7 @@ function moveSound(move: Move | null, position: Chess) {
   play(sound);
 }
 
+let roomRequest = 0;
 let engine: Engine | null = null;
 const getEngine = () => (engine ??= new Engine());
 
@@ -75,7 +77,7 @@ const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).sli
 const lans = (g: Chess) => g.history({ verbose: true }).map((m) => m.lan);
 
 function save() {
-  if (st.online) return; // the server owns online games; keep the saved bot game untouched
+  if (st.online || st.joining) return; // online state must not overwrite the saved bot game
   localStorage.setItem(STORE, JSON.stringify({ id: st.id, moves: lans(st.game), player: st.player, resigned: st.resigned, flagged: st.flagged, tc: st.tc, clock: st.clock }));
 }
 
@@ -396,6 +398,7 @@ addEventListener('resize', fitReviewBoard);
 
 function statusText() {
   if (st.choosing || st.showHistory) return '';
+  if (st.joining) return 'Connecting…';
   if (st.online) return onlineStatus();
   const r = result();
   if (r) return r.winner ? `${r.winner === st.player ? 'You win' : 'Bot wins'} by ${r.how}.` : `Draw by ${r.how}.`;
@@ -569,7 +572,7 @@ function endOverlay() {
 
 function onSquare(sq: Square) {
   if (st.mode === 'review') return onExploreSquare(sq);
-  if (st.mode !== 'play' || st.thinking || st.game.turn() !== st.player || st.promo || st.choosing || st.showHistory) return;
+  if (st.joining || st.mode !== 'play' || st.thinking || st.game.turn() !== st.player || st.promo || st.choosing || st.showHistory) return;
   if (st.online && (!st.online.view?.you || !st.online.view.seats.w || !st.online.view.seats.b || st.online.status !== 'open')) return;
   if (checkFlag()) return;
   const p = st.game.get(sq);
@@ -625,7 +628,7 @@ function playerMove(from: Square, to: Square, promotion?: string) {
 }
 
 async function botMove() {
-  if (st.online) return;
+  if (st.online || st.joining) return;
   if (st.mode !== 'play' || st.choosing || st.game.turn() === st.player || st.thinking) return;
   if (checkFlag()) return;
   st.thinking = true; render();
@@ -846,6 +849,9 @@ async function newOnlineGame(tc: number, side: Color) {
 
 async function enterRoom(room: string) {
   leaveOnline();
+  const request = ++roomRequest;
+  history.replaceState(null, '', `${location.pathname}${location.search}#room=${room}`);
+  st.joining = true;
   engine?.cancelAll();
   Object.assign(st, {
     game: new Chess(), id: `online-${room}`, player: 'w', mode: 'play', selected: null, promo: null, choosing: false, showHistory: false, thinking: false,
@@ -854,18 +860,25 @@ async function enterRoom(room: string) {
   render();
   try {
     if (!seatFor(room)) await joinRoom(room);
+    if (request !== roomRequest) return;
   } catch (e) {
+    if (request !== roomRequest) return;
+    st.joining = false;
     st.onlineErr = (e as Error).message === 'no room' ? 'This game link has expired or does not exist.' : (e as Error).message === 'rate' ? 'Too many attempts. Wait a minute and try again.' : 'Could not join the game. Check your connection.';
     st.choosing = true; history.replaceState(null, '', location.pathname); render();
     return;
   }
   st.online = new Connection(room, syncOnline);
+  st.joining = false;
+  render();
 }
 
 function leaveOnline() {
-  if (!st.online) return;
-  st.online.close(); st.online = null;
-  if (roomFromHash()) history.replaceState(null, '', location.pathname);
+  const wasJoining = st.joining;
+  roomRequest++;
+  st.joining = false;
+  if (st.online) { st.online.close(); st.online = null; }
+  if ((wasJoining || roomFromHash()) && roomFromHash()) history.replaceState(null, '', location.pathname + location.search);
 }
 
 /** Applies the server's full position. Local optimistic moves are replaced whenever they disagree. */

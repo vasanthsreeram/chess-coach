@@ -97,6 +97,20 @@ test('two browsers: invite, legal and prohibited moves, convergence, spectator, 
   for (const P of [A, B, S]) { expect(P.errors).toEqual([]); await P.ctx.close(); }
 });
 
+test('a slow invite join never accepts a move as a bot game', async ({ browser }) => {
+  const A = await player(browser, devices['Pixel 7']), B = await player(browser, devices['Pixel 7']);
+  const url = await createFriendGame(A.page, 3, 'black');
+  await B.page.route('**/api/rooms/*/join', async (route) => { await new Promise((resolve) => setTimeout(resolve, 1800)); await route.continue(); });
+  await B.page.goto(url);
+  await expect(B.page.locator('.status')).toHaveText('Connecting…');
+  await sq(B.page, 'e2').tap(); await sq(B.page, 'e4').tap();
+  expect(await moves(B.page)).toEqual([]);
+  await expect(B.page.locator('.status')).toHaveText(/You play white/);
+  await sq(B.page, 'e2').tap(); await sq(B.page, 'e4').tap();
+  await expect.poll(() => moves(A.page)).toEqual(['e4']);
+  for (const P of [A, B]) { expect(P.errors).toEqual([]); await P.ctx.close(); }
+});
+
 test('mobile: invite via share sheet, join on a second phone, server flags on time (1 minute)', async ({ browser }) => {
   const phone = { ...devices['Pixel 7'] };
   const A = await player(browser, phone), B = await player(browser, phone);
@@ -108,7 +122,12 @@ test('mobile: invite via share sheet, join on a second phone, server flags on ti
   const box = await A.page.getByRole('dialog', { name: 'Invite a friend' }).boundingBox();
   expect(box!.width).toBeLessThanOrEqual(412);
 
+  // Simulate a slow invite join: the board must not briefly behave like a bot game.
+  await B.page.route('**/api/rooms/*/join', async (route) => { await new Promise((resolve) => setTimeout(resolve, 1500)); await route.continue(); });
   await B.page.goto(url);
+  await expect(B.page.locator('.status')).toHaveText('Connecting…');
+  await sq(B.page, 'e2').tap(); await sq(B.page, 'e4').tap();
+  expect(await moves(B.page)).toEqual([]);
   await expect(B.page.locator('.status')).toHaveText(/You play white/);
   await sq(B.page, 'e2').tap(); await sq(B.page, 'e4').tap();
   await expect.poll(() => moves(A.page)).toEqual(['e4']);
