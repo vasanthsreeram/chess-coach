@@ -1,0 +1,13 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+.wrangler/
+deploy/.cloudflare/
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+*.log
+
+deploy/node_modules
