@@ -16,6 +16,8 @@ const HISTORY = 'chess-minimal.history.v1';
 const TC_PREF = 'chess-minimal.tc.v1';
 const BOT_DEPTH = 8;
 const REVIEW_DEPTH = 12;
+// Keep a hard per-position time budget on slow phones while retaining a depth ceiling.
+const REVIEW_MOVETIME_MS = 600;
 
 type Mode = 'play' | 'over' | 'review';
 type Result = { winner: Color | null; how: string };
@@ -649,7 +651,7 @@ async function openReview(rec: GameRecord) {
         if (c.isCheckmate()) out.push({ score: { mate: 0 }, best: null, terminal: 'mate' });
         else if (c.isStalemate() || c.isInsufficientMaterial()) out.push({ score: { cp: 0 }, best: null, terminal: 'draw' });
         else {
-          const r = await eng.search(fens[i], { depth: REVIEW_DEPTH });
+          const r = await eng.search(fens[i], { depth: REVIEW_DEPTH, movetime: REVIEW_MOVETIME_MS });
           const l = r.lines[0];
           out.push({ score: { cp: l?.cp, mate: l?.mate }, best: r.bestmove, pv: l?.pv.slice(0, 8) });
         }

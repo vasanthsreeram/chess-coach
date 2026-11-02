@@ -55,7 +55,8 @@ export class Engine {
         };
         this.worker.postMessage(`setoption name MultiPV value ${opts.multipv ?? 1}`);
         this.worker.postMessage(`position fen ${fen}`);
-        this.worker.postMessage(opts.depth ? `go depth ${opts.depth}` : `go movetime ${opts.movetime ?? 500}`);
+        const limits = [opts.depth ? `depth ${opts.depth}` : '', opts.movetime ? `movetime ${opts.movetime}` : ''].filter(Boolean).join(' ');
+        this.worker.postMessage(`go ${limits || 'movetime 500'}`);
       });
     };
     const p = this.chain.then(run, run);
