@@ -6,6 +6,8 @@ import { pickBotMove, reviewGame, winPct, fmtScore, pvSan, sanOf, type PlyReview
 import { type Clock, TIME_CONTROLS, startClock, remaining, press, timeoutResult, fmtClock } from './clock';
 import { buildFeedback, defaultPick, describeLine, type Feedback, type FeedbackInput } from './facts';
 import { requestFeedback, cancelFeedback, cached, feedbackKey, stats as feedbackStats } from './feedback';
+import { REVIEW_DEPTH, REVIEW_MOVETIME_MS, resultOf, type ImportedGame } from './chesscom';
+import { importChesscom, parsePgn, fetchCachedAnalysis, storeAnalysis, stats as importStats } from './importer';
 import { play, unlockAudio, isMuted, setMuted, soundState, type SoundName } from './sound';
 import { Connection, createRoom, joinRoom, roomFromHash, inviteUrl, seatFor } from './online';
 
@@ -16,14 +18,13 @@ const STORE = 'chess-minimal.v1';
 const HISTORY = 'chess-minimal.history.v1';
 const TC_PREF = 'chess-minimal.tc.v1';
 const BOT_DEPTH = 8;
-const REVIEW_DEPTH = 12;
-// Keep a hard per-position time budget on slow phones while retaining a depth ceiling.
-const REVIEW_MOVETIME_MS = 600;
 
 type Mode = 'play' | 'over' | 'review';
 type Result = { winner: Color | null; how: string };
 /** A finished game as stored in this browser's history. */
-interface GameRecord { id: string; moves: string[]; player: Color; result: Result; tc: number | null; endedAt: number; evals?: PositionEval[] }
+interface GameRecord { id: string; moves: string[]; player: Color; result: Result; tc: number | null; endedAt: number; evals?: PositionEval[]; source?: GameSource }
+/** Imported games: public chess.com game (shared analysis cache) or a locally pasted PGN. */
+interface GameSource { site: 'chess.com' | 'pgn'; key?: string; url?: string; white: string; black: string }
 
 const st = {
   game: new Chess(),
@@ -34,6 +35,7 @@ const st = {
   promo: null as { from: Square; to: Square } | null,
   choosing: false,
   showHistory: false,
+  importing: null as null | { busy: boolean; msg: string; needUser: boolean; text?: string; user?: string; game?: ImportedGame; pgn?: ReturnType<typeof parsePgn> },
   thinking: false,
   resigned: null as Color | null,
   flagged: null as Color | null,
@@ -42,6 +44,7 @@ const st = {
   tcChoice: 3 as number | null,
   // review of a stored game
   rec: null as GameRecord | null,
+  evalsSource: null as null | 'local' | 'saved' | 'engine',
   review: null as PlyReview[] | null,
   evals: null as PositionEval[] | null,
   progress: 0,
@@ -317,7 +320,8 @@ function render() {
   }
   if (arrows) board.append($(`<svg class="arrows" viewBox="0 0 8 8">${arrows}</svg>`));
   if (st.promo) board.append(promoOverlay(pos.turn()));
-  if (st.showHistory) board.append(historyOverlay());
+  if (st.importing) board.append(importOverlay());
+  else if (st.showHistory) board.append(historyOverlay());
   else if (st.choosing) board.append(chooseOverlay());
   else if (st.mode === 'over') board.append(endOverlay());
   else if (st.online) { const w = onlineOverlay(); if (w) board.append(w); }
@@ -416,6 +420,12 @@ function stepSound() {
 function coachCard(pos: Chess) {
   const card = $(`<section class="coach" aria-label="Coach"></section>`);
   const panel = explainPanel(pos);
+  const src = st.rec?.source;
+  if (src) {
+    const link = src.site === 'chess.com' && src.url ? ` · <a href="${esc(src.url)}" target="_blank" rel="noopener noreferrer">View on Chess.com</a>` : '';
+    const how = st.evalsSource === 'saved' ? ' · saved analysis (this browser)' : '';
+    panel.prepend($(`<p class="srcline dim">${esc(src.white)} vs ${esc(src.black)}${src.site === 'chess.com' ? ' · Chess.com' : ' · PGN'}${how}${link}</p>`));
+  }
   card.append(panel);
   return card;
 }
@@ -527,6 +537,97 @@ function chooseOverlay() {
   return o;
 }
 
+const IMPORT_ERR: Record<string, string> = {
+  link: 'Paste a Chess.com game link (chess.com/game/live/… or /daily/…) or a PGN.',
+  need_username: 'Add one player’s Chess.com username so the game can be found in their public archive.',
+  not_found: 'Not found in the last 3 months of that player’s public games. Check the username, or paste the PGN (Chess.com: Share → PGN).',
+  unsupported: 'Only standard chess from the normal start position can be reviewed. Paste a PGN instead.',
+  incomplete: 'Only finished games can be reviewed. Try again after the game ends.',
+  pgn_unfinished: 'This PGN has no final result. Only finished games can be reviewed.',
+  username: 'That username is not valid.',
+  rate: 'Too many imports right now. Wait a minute, or paste the PGN.',
+  upstream_busy: 'Chess.com is busy. Try again shortly, or paste the PGN.',
+  upstream: 'Chess.com could not be reached. Try again, or paste the PGN.',
+  network: 'You seem to be offline. Paste the PGN to review it here.',
+};
+
+function openImport() { st.importing = { busy: false, msg: '', needUser: false }; st.showHistory = false; st.choosing = false; render(); }
+
+async function runImport(text: string, user: string) {
+  const imp = st.importing!;
+  const pgn = /chess\.com\//i.test(text) ? null : parsePgn(text);
+  if (pgn) {
+    const done = ['1-0', '0-1', '1/2-1/2'].includes(pgn.result) || (() => { const c = new Chess(); for (const m of pgn.moves) c.move(uciToMove(m)); return !!positionResult(c); })();
+    if (done) { imp.pgn = pgn; imp.msg = ''; } else imp.msg = IMPORT_ERR.pgn_unfinished;
+    render(); return;
+  }
+  imp.busy = true; imp.msg = 'Looking up the game on Chess.com…'; render();
+  const r = await importChesscom(text, user);
+  if (st.importing !== imp) return;
+  imp.busy = false;
+  if (r.ok) { imp.game = r.game; imp.msg = ''; }
+  else { imp.msg = IMPORT_ERR[r.error] ?? IMPORT_ERR.upstream; imp.needUser = imp.needUser || r.error === 'need_username' || r.error === 'not_found'; }
+  render();
+}
+
+function reviewImported(player: Color) {
+  const imp = st.importing!;
+  let rec: GameRecord;
+  if (imp.game) {
+    const g = imp.game; const base = /^(\d+)(?:\+\d+)?$/.exec(g.timeControl);
+    rec = { id: `chesscom-${g.key.replace(':', '-')}`, moves: g.moves, player, result: resultOf(g), tc: base && Number(base[1]) % 60 === 0 ? Number(base[1]) / 60 : null,
+      endedAt: g.endTime ? g.endTime * 1000 : Date.now(), source: { site: 'chess.com', key: g.key, url: g.url, white: g.white, black: g.black } };
+  } else {
+    const p = imp.pgn!; const res = p.result === '1-0' ? 'w' : p.result === '0-1' ? 'b' : null;
+    const fin = (() => { const c = new Chess(); for (const m of p.moves) c.move(uciToMove(m)); return positionResult(c); })();
+    rec = { id: `pgn-${legacyId(p.moves, '', '')}`, moves: p.moves, player, result: fin ?? { winner: res, how: p.result === '1/2-1/2' ? 'agreement' : res ? 'result' : 'unfinished' }, tc: null, endedAt: Date.now(), source: { site: 'pgn', white: p.white, black: p.black } };
+  }
+  const prev = loadHistory().find((r) => r.id === rec.id);
+  if (prev?.evals) rec.evals = prev.evals;
+  archive(rec);
+  st.importing = null;
+  openReview(loadHistory().find((r) => r.id === rec.id)!);
+}
+
+function importOverlay() {
+  const imp = st.importing!;
+  const o = $(`<div class="overlay import-overlay"><div class="panel col import" role="dialog" aria-label="Import a game"></div></div>`);
+  const p = o.firstElementChild as HTMLElement;
+  p.onclick = (e) => e.stopPropagation();
+  p.append($(`<h2>Review a game</h2>`));
+  const found = imp.game ? { white: imp.game.white, black: imp.game.black, n: imp.game.moves.length, res: resultOf(imp.game) } : imp.pgn ? { white: imp.pgn.white, black: imp.pgn.black, n: imp.pgn.moves.length, res: null } : null;
+  if (found) {
+    p.append($(`<p class="note">${esc(found.white)} (white) vs ${esc(found.black)} (black) · ${Math.ceil(found.n / 2)} moves${found.res ? ` · ${found.res.winner ? (found.res.winner === 'w' ? 'White' : 'Black') + ' won' : 'Draw'} by ${esc(found.res.how)}` : ''}</p>`));
+    p.append($(`<p class="lab">Review from whose side?</p>`));
+    const sides = $(`<div class="sides"></div>`);
+    for (const c of ['w', 'b'] as Color[]) {
+      const name = c === 'w' ? found.white : found.black;
+      const b = $(`<button class="side" aria-label="Review as ${esc(name)} (${colorName(c)})">${pieceHtml(c, 'k')}<small>${esc(name)}</small></button>`);
+      b.onclick = () => reviewImported(c);
+      sides.append(b);
+    }
+    p.append(sides);
+    if (imp.game) p.append($(`<p class="note dim">Public game data from the Chess.com Published-Data API. <a href="${esc(imp.game.url)}" target="_blank" rel="noopener noreferrer">View on Chess.com</a></p>`));
+  } else {
+    const ta = $(`<textarea rows="3" maxlength="20000" aria-label="Chess.com share text, game link or PGN" placeholder="Paste the Chess.com share text or game link, or a PGN"></textarea>`) as HTMLTextAreaElement;
+    const user = $(`<input type="text" maxlength="25" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Chess.com username of either player" placeholder="Username of either player${imp.needUser ? '' : ' (optional)'}">`) as HTMLInputElement;
+    ta.value = imp.text ?? ''; user.value = imp.user ?? '';
+    ta.oninput = () => { imp.text = ta.value; }; user.oninput = () => { imp.user = user.value; };
+    const go = $(`<button class="next" aria-label="Find game">${imp.busy ? 'Looking up…' : 'Find game'}</button>`) as HTMLButtonElement;
+    go.disabled = imp.busy;
+    go.onclick = () => runImport(ta.value.trim(), user.value.trim());
+    p.append(ta, user);
+    if (imp.msg) p.append($(`<p class="note msg" role="status">${esc(imp.msg)}</p>`));
+    p.append(go, $(`<p class="note dim">Only finished public games. Usernames and moves are cached; engine analysis is saved for this browser only.</p>`));
+  }
+  p.append($(`<p class="note dim affil">Not affiliated with or endorsed by Chess.com. Chess.com is a trademark of its owner.</p>`));
+  const close = $(`<button class="act" aria-label="Close import">${ICON.close}<span>Close</span></button>`);
+  close.onclick = () => { st.importing = null; render(); };
+  p.append(close);
+  o.onclick = () => { if (!imp.busy) { st.importing = null; render(); } };
+  return o;
+}
+
 function historyOverlay() {
   const h = loadHistory();
   const o = $(`<div class="overlay"><div class="panel hist" role="dialog" aria-label="Game history"></div></div>`);
@@ -536,12 +637,16 @@ function historyOverlay() {
   for (const r of h) {
     const kind = r.result.winner === null ? 'draw' : r.result.winner === r.player ? 'win' : 'loss';
     const d = new Date(r.endedAt);
+    const vs = r.source ? ` · vs ${esc(r.player === 'w' ? r.source.black : r.source.white)}${r.source.site === 'chess.com' ? ' (Chess.com)' : ' (PGN)'}` : '';
     const when = `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
-    const b = $(`<button role="listitem" class="hrow" data-id="${esc(r.id)}" aria-label="${kind} by ${r.result.how}, ${Math.ceil(r.moves.length / 2)} moves, ${when}"><span class="ri ${kind}">${ICON[kind]}</span><span class="hk ${kind}">${kind === 'win' ? 'Won' : kind === 'loss' ? 'Lost' : 'Draw'} · ${esc(r.result.how)} <small>as ${colorName(r.player)}</small></span><span class="dim">${r.tc ? `${r.tc} min · ` : ''}${Math.ceil(r.moves.length / 2)} mv · ${when}</span></button>`);
+    const b = $(`<button role="listitem" class="hrow" data-id="${esc(r.id)}" aria-label="${kind} by ${r.result.how}, ${Math.ceil(r.moves.length / 2)} moves, ${when}"><span class="ri ${kind}">${ICON[kind]}</span><span class="hk ${kind}">${kind === 'win' ? 'Won' : kind === 'loss' ? 'Lost' : 'Draw'} · ${esc(r.result.how)} <small>as ${colorName(r.player)}${vs}</small></span><span class="dim">${r.tc ? `${r.tc} min · ` : ''}${Math.ceil(r.moves.length / 2)} mv · ${when}</span></button>`);
     b.onclick = (e) => { e.stopPropagation(); openReview(r); };
     list.append(b);
   }
   p.append(list);
+  const imp = $(`<button class="act" title="Import a Chess.com game or PGN" aria-label="Import a Chess.com game">${ICON.review}<span>Import</span></button>`);
+  imp.onclick = (e) => { e.stopPropagation(); openImport(); };
+  p.append(imp);
   if (!h.length) list.append($(`<p class="note">No finished games yet.</p>`));
   const close = $(`<button class="act" title="Close history" aria-label="Close history">${ICON.close}<span>Close</span></button>`);
   close.onclick = (e) => { e.stopPropagation(); st.showHistory = false; render(); };
@@ -697,6 +802,13 @@ async function openReview(rec: GameRecord) {
   Object.assign(st, { mode: 'review', rec, review: null, evals: null, idx: -1, progress: 0, choosing: false, showHistory: false, selected: null, promo: null, explore: null, exEval: null, thinking: false });
   render();
   let evals = rec.evals;
+  let source: 'local' | 'saved' | 'engine' = 'local';
+  const shared = rec.source?.site === 'chess.com' && rec.source.key ? rec.source.key : null;
+  if ((!evals || evals.length !== rec.moves.length + 1) && shared) {
+    const hit = await fetchCachedAnalysis(shared, rec.moves);
+    if (st.rec !== rec) return;
+    if (hit) { evals = hit; source = 'saved'; archive({ ...rec, evals }); }
+  }
   if (!evals || evals.length !== rec.moves.length + 1) {
     const pos = new Chess();
     const fens = [pos.fen(), ...rec.moves.map((m) => (pos.move(uciToMove(m)), pos.fen()))];
@@ -720,11 +832,12 @@ async function openReview(rec: GameRecord) {
       if (e instanceof Cancelled) return;
       throw e;
     }
-    evals = out;
+    evals = out; source = 'engine';
     archive({ ...rec, evals });
+    if (shared) storeAnalysis(shared, out);
   }
   if (st.rec !== rec) return;
-  st.evals = evals;
+  st.evals = evals; st.evalsSource = source;
   st.review = reviewGame(new Chess().fen(), rec.moves, evals);
   st.idx = Math.max(0, st.review.findIndex((p) => p.color === rec.player && p.quality === 'blunder'));
   render();
@@ -817,7 +930,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) chec
   fen: () => st.game.fen(), moves: () => st.game.history(), mode: () => st.mode, review: () => st.review,
   clock: () => (st.clock ? { w: remaining(st.clock, 'w', st.game.turn(), Date.now()), b: remaining(st.clock, 'b', st.game.turn(), Date.now()) } : null),
   online: () => (st.online ? { status: st.online.status, view: st.online.view, room: st.online.room } : null), dropSocket: () => st.online?.drop(),
-  result: () => result(), sound: () => soundState(), history: () => loadHistory(), shownFen: () => shownPosition().pos.fen(), exEval: () => st.exEval, feedbackStats: () => ({ ...feedbackStats }),
+  result: () => result(), sound: () => soundState(), history: () => loadHistory(), shownFen: () => shownPosition().pos.fen(), exEval: () => st.exEval, feedbackStats: () => ({ ...feedbackStats }), importStats: () => ({ ...importStats }), evalsSource: () => st.evalsSource,
 };
 
 // Unlock audio on the first deliberate interactions (autoplay policies, iOS needs a touch/click).

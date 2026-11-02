@@ -31,9 +31,24 @@ Cloudflare uses connection information for request handling and rate limits.
 
 ## Chess.com imports
 
-The D1 schema for a future import cache is provided in `migrations/`. Imports
-and shared analysis caching are not enabled in this release; cached analysis
-must be protected from untrusted clients before it is shared.
+The `prep/chesscom-import` branch prepares completed-game imports using the
+Chess.com Published-Data API; it is not deployed on the public site. Before
+activating it, clarify the interaction between Chess.com's API guidance and
+its AI restrictions. It searches the three newest archive months for up to
+two players; older games can be pasted as PGN. Bare links may require a player
+username because the API has no documented game-by-id lookup.
+
+The app caches public game records in D1 and partitions saved analysis by a
+secret stored in each browser. The same browser can reuse its analysis; other
+browsers run the engine again. Shared analysis across users would require a
+trusted server-side engine rather than accepting anonymous client evaluations.
+Clearing the browser's site data removes its cache key. Only completed games
+should be analysed.
+
+For deployment, apply the SQL migrations and add a `DB` D1 binding to your own
+Cloudflare configuration (for example `bindings.d1({ name: 'your-database',
+id: 'your-database-id' })`). Never accept arbitrary browser evaluations into a
+cache shared by unrelated users.
 
 ## Licence
 

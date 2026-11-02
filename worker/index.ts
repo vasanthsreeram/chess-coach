@@ -1,6 +1,7 @@
 // Cloudflare Worker: static assets plus POST /api/feedback, which phrases server-computed chess facts
 // with DeepSeek V4.1 Flash on Workers AI. The model never sees user text and its output is validated.
 import { randomToken } from './tokens';
+import { handleAnalysisGet, handleAnalysisPut, handleImport, type D1Like, type Fetcher } from './chesscom';
 import { buildFeedback, defaultPick, RESPONSE_SCHEMA, sanitizeInput, SYSTEM_PROMPT, userPrompt, validateModelOutput, FEEDBACK_VERSION } from '../src/facts';
 
 export const MODEL = '@cf/deepseek-ai/deepseek-v4.1-flash-1017';
@@ -17,6 +18,8 @@ export interface Env {
   ROOMS?: DurableObjectNamespace;
   RL_ROOM?: RateLimit;
   RL_WS?: RateLimit;
+  /** Optional D1 cache for Chess.com imports and analysis; routes degrade safely without it. */
+  DB?: D1Like;
 }
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), {
@@ -112,10 +115,12 @@ export async function handleRooms(req: Request, env: Env, url: URL): Promise<Res
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, _ctx?: unknown, fetcher: Fetcher = (u, i) => fetch(u, i)): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === '/api/feedback') return handleFeedback(req, env);
     if (url.pathname === '/api/rooms' || url.pathname.startsWith('/api/rooms/')) return handleRooms(req, env, url);
+    if (url.pathname === '/api/chesscom/import') return handleImport(req, env, fetcher);
+    if (url.pathname === '/api/analysis') return req.method === 'GET' ? handleAnalysisGet(req, env) : req.method === 'PUT' ? handleAnalysisPut(req, env) : json(405, { error: 'method' });
     if (url.pathname.startsWith('/api/')) return json(404, { error: 'not found' });
     return env.ASSETS.fetch(req);
   },

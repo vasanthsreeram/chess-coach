@@ -1,0 +1,28 @@
+{
+  "archives_samplewhite": {
+    "archives": [
+      "https://api.chess.com/pub/player/samplewhite/games/2026/11"
+    ]
+  },
+  "month_2026_11": {
+    "games": [
+      {
+        "url": "https://www.chess.com/game/live/987654321234",
+        "pgn": "[Event \"?\"]\n[Site \"?\"]\n[Date \"????.??.??\"]\n[Round \"?\"]\n[White \"samplewhite\"]\n[Black \"sampleblack\"]\n[Result \"1-0\"]\n\n1. e4 h6 2. Bb5 c5 3. Bc6 a6 4. h3 Qa5 5. Qe2 b5 6. e5 Ra7 7. c3 Qxc3 8. Qc4 b4 9. Qxc3 Rb7 10. Bxd7+ Kxd7 11. Qf3 Kc7 12. Rh2 Bf5 13. Qd1 Nd7 14. Qe2 f6 15. f3 Ra7 16. g4 Rh7 17. Na3 c4 18. Qf2 Kd8 19. Qe3 Ke8 20. Qc5 Be6 21. Nc2 Ra8 22. b3 cxb3 23. Ne3 Bc4 24. a3 Bd5 25. Kf2 f5 26. Ne2 Rh8 27. gxf5 a5 28. Qb6 Be4 29. Rh1 Bb1 30. Qc5 g5 31. Ng4 Ra6 32. Kg1 1-0",
+        "rules": "chess",
+        "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "end_time": 1793600000,
+        "time_class": "rapid",
+        "time_control": "600",
+        "white": {
+          "username": "samplewhite",
+          "result": "win"
+        },
+        "black": {
+          "username": "sampleblack",
+          "result": "resigned"
+        }
+      }
+    ]
+  }
+}

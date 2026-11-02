@@ -6,7 +6,23 @@ import { execFile } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import worker, { type Env } from '../worker/index';
+import { fakeD1 } from './fakeD1';
+import type { Fetcher } from '../worker/chesscom';
+
+// Chess.com upstream: a recorded fixture by default (no network in tests); CHESSCOM_LIVE=1 uses the real public API.
+const fixture = JSON.parse(readFileSync(new URL('../tests/fixtures/chesscom-sample.json', import.meta.url), 'utf8'));
+export const upstreamLog: string[] = [];
+const fixtureFetch: Fetcher = async (url) => {
+  upstreamLog.push(url);
+  const body = url.endsWith('/samplewhite/games/archives') ? fixture.archives_samplewhite : url.endsWith('/samplewhite/games/2026/11') ? fixture.month_2026_11
+    : /\/games\/archives$/.test(url) ? { archives: [] } : /\/games\/\d{4}\/\d{2}$/.test(url) ? { games: [] } : null;
+  return new Response(body ? JSON.stringify(body) : '{"code":0}', { status: body ? 200 : 404 });
+};
+const upstream: Fetcher = process.env.CHESSCOM_LIVE === '1' ? (u, i) => { upstreamLog.push(u); return fetch(u, i); } : fixtureFetch;
+let d1Down = process.env.FAKE_D1_DOWN === '1';
+let db = fakeD1({ fail: () => d1Down });
 
 function limiter(limit: number) {
   const hits = new Map<string, number[]>();
@@ -39,17 +55,21 @@ const realAI: Env['AI'] = {
 export const apiLog: { status: number; model: string | null }[] = [];
 
 export function feedbackApi(): Plugin {
-  const env: Env = { ASSETS: { fetch: async () => new Response('', { status: 404 }) }, AI: process.env.DS_REAL === '1' ? realAI : mockAI, RL_IP: limiter(Number(process.env.RL_IP ?? 20)), RL_GLOBAL: limiter(300) };
+  const env: Env = { ASSETS: { fetch: async () => new Response('', { status: 404 }) }, AI: process.env.DS_REAL === '1' ? realAI : mockAI, RL_IP: limiter(Number(process.env.RL_IP ?? 20)), RL_GLOBAL: limiter(300), get DB() { return db; } };
   const mw: Connect.NextHandleFunction = async (req, res, next) => {
-    if (!req.url?.endsWith('/api/feedback')) return next();
+    const path = req.url?.split('?')[0] ?? '';
+    // Test-only switch to simulate a D1 outage (dev/preview server only; never part of the Worker).
+    if (path.endsWith('/__test/d1')) { d1Down = req.url!.includes('down=1'); if (req.url!.includes('reset=1')) db = fakeD1({ fail: () => d1Down }); res.end('ok'); return; }
+    if (!/\/api\/(feedback|chesscom\/import|analysis)$/.test(path)) return next();
     const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer);
     const host = req.headers.host ?? 'localhost';
     const headers = new Headers(); for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers.set(k, v);
     headers.set('cf-connecting-ip', req.socket.remoteAddress ?? 'local');
-    const r = await worker.fetch(new Request(`http://${host}/api/feedback`, { method: req.method, headers, body: req.method === 'POST' ? Buffer.concat(chunks) : undefined }), env);
+    const apiPath = req.url!.slice(req.url!.indexOf('/api/'));
+    const r = await worker.fetch(new Request(`http://${host}${apiPath}`, { method: req.method, headers, body: req.method === 'POST' || req.method === 'PUT' ? Buffer.concat(chunks) : undefined }), env, undefined, upstream);
     const body = await r.text();
-    try { apiLog.push({ status: r.status, model: r.status === 200 ? JSON.parse(body).model : null }); } catch { /* non-JSON */ }
-    console.log(`[api] ${r.status} ${r.status === 200 ? JSON.parse(body).model ?? 'fallback' : ''}`);
+    if (apiPath.startsWith('/api/feedback')) try { apiLog.push({ status: r.status, model: r.status === 200 ? JSON.parse(body).model : null }); } catch { /* non-JSON */ }
+    console.log(`[api] ${req.method} ${apiPath.split('?')[0]} ${r.status}`);
     res.statusCode = r.status; r.headers.forEach((v, k) => res.setHeader(k, v)); res.end(body);
   };
   return { name: 'feedback-api', configureServer: (s) => { s.middlewares.use(mw); }, configurePreviewServer: (s) => { s.middlewares.use(mw); } };
