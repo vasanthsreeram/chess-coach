@@ -7,6 +7,7 @@ import { type Clock, TIME_CONTROLS, startClock, remaining, press, timeoutResult,
 import { buildFeedback, defaultPick, describeLine, type Feedback, type FeedbackInput } from './facts';
 import { requestFeedback, cancelFeedback, cached, feedbackKey, stats as feedbackStats } from './feedback';
 import { play, unlockAudio, isMuted, setMuted, soundState, type SoundName } from './sound';
+import { Connection, createRoom, joinRoom, roomFromHash, inviteUrl, seatFor } from './online';
 
 const GLYPH: Record<string, string> = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' };
 const NAME: Record<string, string> = { k: 'king', q: 'queen', r: 'rook', b: 'bishop', n: 'knight', p: 'pawn' };
@@ -50,6 +51,10 @@ const st = {
   exEval: null as { fen: string; e: PositionEval } | null,
   exToken: 0,
   showBest: true,
+  // invite-link game against another person; null for bot games
+  online: null as Connection | null,
+  onlineErr: '',
+  vsFriend: false,
 };
 
 function moveSound(move: Move | null, position: Chess) {
@@ -70,6 +75,7 @@ const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).sli
 const lans = (g: Chess) => g.history({ verbose: true }).map((m) => m.lan);
 
 function save() {
+  if (st.online) return; // the server owns online games; keep the saved bot game untouched
   localStorage.setItem(STORE, JSON.stringify({ id: st.id, moves: lans(st.game), player: st.player, resigned: st.resigned, flagged: st.flagged, tc: st.tc, clock: st.clock }));
 }
 
@@ -132,6 +138,7 @@ function positionResult(g: Chess): Result | null {
 }
 
 function result(): Result | null {
+  if (st.online) return st.online.view?.result ?? null;
   if (st.resigned) return { winner: st.resigned === 'w' ? 'b' : 'w', how: 'resignation' };
   if (st.flagged) return timeoutResult(st.game, st.flagged);
   return positionResult(st.game);
@@ -171,11 +178,16 @@ function whiteView(e: PositionEval | undefined, turn: Color): Score {
 
 function clockEl(side: Color) {
   const turn = st.game.turn();
-  const running = st.mode === 'play' && !result() && st.clock!.since !== null && turn === side;
-  const ms = remaining(st.clock!, side, turn, Date.now());
-  const who = side === st.player ? 'You' : 'Bot';
-  return $(`<div class="clock ${running ? 'on' : ''} ${ms < 10_000 ? 'low' : ''}" data-side="${side}" role="timer" aria-label="${who} (${colorName(side)}) clock"><span class="who"><span class="dotc ${side}"></span>${who}${side === st.player ? '' : ' <small>≈900</small>'}</span><span class="t">${fmtClock(ms)}</span></div>`);
+  const o = st.online;
+  const running = o ? o.view?.running === side : st.mode === 'play' && !result() && st.clock!.since !== null && turn === side;
+  const ms = clockMs(side);
+  const you = o ? o.view?.you : st.player;
+  const who = side === you ? 'You' : o ? (you ? 'Opponent' : colorName(side)[0].toUpperCase() + colorName(side).slice(1)) : 'Bot';
+  const away = o?.view && o.view.seats[side] && !o.view.online[side] ? ' <small>offline</small>' : '';
+  return $(`<div class="clock ${running ? 'on' : ''} ${ms < 10_000 ? 'low' : ''}" data-side="${side}" role="timer" aria-label="${who} (${colorName(side)}) clock"><span class="who"><span class="dotc ${side}"></span>${who}${o ? away : side === st.player ? '' : ' <small>≈900</small>'}</span><span class="t">${fmtClock(ms)}</span></div>`);
 }
+
+const clockMs = (side: Color) => (st.online ? st.online.clockMs(side) : remaining(st.clock!, side, st.game.turn(), Date.now()));
 
 /** Win percentage and label for the eval bar, both from White's point of view. */
 function evalInfo(e: PositionEval | undefined, turn: Color): { pct: number; label: string } {
@@ -207,13 +219,19 @@ function render() {
     back.onclick = closeReview;
     top.append(back, $(`<h1>Move analysis</h1>`), soundBtn(), sourceLink());
   } else {
+    if (st.online) {
+      const inv = $(`<button class="icon" title="Copy invite link" aria-label="Copy invite link">${ICON.share}</button>`);
+      inv.onclick = () => shareInvite();
+      top.append(inv);
+    }
     const newBtn = $(`<button class="icon" title="New game" aria-label="New game">${ICON.newGame}</button>`);
     newBtn.onclick = () => { st.choosing = true; st.showHistory = false; render(); };
     top.append(newBtn);
     if (st.mode === 'play') {
       const resign = $(`<button class="icon" title="Resign" aria-label="Resign">${ICON.flag}</button>`) as HTMLButtonElement;
       resign.disabled = st.game.history().length < 1;
-      resign.onclick = () => { st.resigned = st.player; endGame(); };
+      resign.onclick = () => { if (st.online) st.online.send({ t: 'resign' }); else { st.resigned = st.player; endGame(); } };
+      if (st.online && !st.online.view?.you) resign.disabled = true;
       top.append(resign);
     }
     if (st.mode === 'over') {
@@ -240,7 +258,7 @@ function render() {
     wrap.append($(`<div class="evalbar" role="meter" aria-label="Evaluation ${label}, White win chance ${Math.round(pct)} percent" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><div class="w" style="width:${pct}%"></div><span class="lbl ${ahead}">${label}</span></div>`));
   }
 
-  const showClocks = !reviewing && st.tc && st.clock;
+  const showClocks = !reviewing && st.tc && (st.clock || st.online?.view);
   if (showClocks) { wrap.classList.add('clocked'); wrap.append(clockEl(st.player === 'w' ? 'b' : 'w')); }
 
   // board
@@ -300,6 +318,7 @@ function render() {
   if (st.showHistory) board.append(historyOverlay());
   else if (st.choosing) board.append(chooseOverlay());
   else if (st.mode === 'over') board.append(endOverlay());
+  else if (st.online) { const w = onlineOverlay(); if (w) board.append(w); }
   wrap.append(board);
   if (reviewing && st.review) wrap.append(coachCard(pos));
   if (showClocks) wrap.append(clockEl(st.player));
@@ -377,6 +396,7 @@ addEventListener('resize', fitReviewBoard);
 
 function statusText() {
   if (st.choosing || st.showHistory) return '';
+  if (st.online) return onlineStatus();
   const r = result();
   if (r) return r.winner ? `${r.winner === st.player ? 'You win' : 'Bot wins'} by ${r.how}.` : `Draw by ${r.how}.`;
   if (st.thinking) return 'Bot is thinking…';
@@ -477,16 +497,29 @@ function chooseOverlay() {
     const label = m ? `${m} minute${m > 1 ? 's' : ''} per side` : 'No clock';
     const b = $(`<button class="tc ${st.tcChoice === m ? 'on' : ''}" role="radio" aria-checked="${st.tcChoice === m}" title="${label}" aria-label="${label}">${m ? `${m}<small>min</small>` : `∞<small>no clock</small>`}</button>`);
     b.onclick = (e) => { e.stopPropagation(); st.tcChoice = m; localStorage.setItem(TC_PREF, m ? String(m) : 'none'); render(); };
+    if (st.vsFriend && m === null) (b as HTMLButtonElement).disabled = true; // online games always have a clock
     tcRow.append(b);
   }
   const sides = $(`<div class="sides"></div>`);
   const opts: [Color | 'r', string, string][] = [['w', 'Play as white', 'White'], ['b', 'Play as black', 'Black'], ['r', 'Random colour', 'Random']];
   for (const [c, label, text] of opts) {
     const b = $(`<button class="side" title="${label}" aria-label="${label}">${c === 'r' ? `<span class="pair">${pieceHtml('w', 'k')}${pieceHtml('b', 'k')}</span>` : pieceHtml(c, 'k')}<small>${text}</small></button>`);
-    b.onclick = (e) => { e.stopPropagation(); newGame(c === 'r' ? (Math.random() < 0.5 ? 'w' : 'b') : c); };
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const side: Color = c === 'r' ? (Math.random() < 0.5 ? 'w' : 'b') : c;
+      if (st.vsFriend) newOnlineGame(st.tcChoice ?? 10, side); else newGame(side);
+    };
     sides.append(b);
   }
-  o.firstElementChild!.append($(`<h2>New game <small>vs bot ≈900</small></h2>`), $(`<p class="lab">${ICON.clock}Time per side</p>`), tcRow, $(`<p class="lab">Play as</p>`), sides);
+  const vs = $(`<div class="tcs" role="radiogroup" aria-label="Opponent"></div>`);
+  for (const [friend, label] of [[false, 'Bot'], [true, 'Friend']] as const) {
+    const b = $(`<button class="tc vs ${st.vsFriend === friend ? 'on' : ''}" role="radio" aria-checked="${st.vsFriend === friend}" aria-label="Play against ${friend ? 'a friend with an invite link' : 'the bot'}">${label}<small>${friend ? 'invite link' : '≈900'}</small></button>`);
+    b.onclick = (e) => { e.stopPropagation(); st.vsFriend = friend; if (friend && st.tcChoice === null) st.tcChoice = 10; render(); };
+    vs.append(b);
+  }
+  const err = st.onlineErr ? $(`<p class="note err" role="alert">${esc(st.onlineErr)}</p>`) : null;
+  o.firstElementChild!.append($(`<h2>New game <small>${st.vsFriend ? 'vs a friend' : 'vs bot ≈900'}</small></h2>`), $(`<p class="lab">Opponent</p>`), vs, $(`<p class="lab">${ICON.clock}Time per side</p>`), tcRow, $(`<p class="lab">Play as</p>`), sides);
+  if (err) o.firstElementChild!.append(err);
   o.onclick = () => { if (st.game.history().length || st.mode !== 'play') { st.choosing = false; render(); } };
   return o;
 }
@@ -517,9 +550,17 @@ function historyOverlay() {
 function endOverlay() {
   const r = result()!;
   const kind = r.winner === null ? 'draw' : r.winner === st.player ? 'win' : 'loss';
+  if (st.online && !st.online.view?.you) {
+    const o = $(`<div class="overlay" data-result="${r.winner ?? 'draw'}" data-how="${r.how}"><div class="panel" role="dialog" aria-label="Game over"><p class="endt"><b>${r.winner ? `${colorName(r.winner)} won` : r.how === 'aborted' ? 'Aborted' : 'Draw'}</b><small>by ${r.how}</small></p></div></div>`);
+    const ng = $(`<button class="act" title="New game" aria-label="New game">${ICON.newGame}<span>New</span></button>`);
+    ng.onclick = (e) => { e.stopPropagation(); st.choosing = true; render(); };
+    o.firstElementChild!.append(ng);
+    return o;
+  }
   const o = $(`<div class="overlay" data-result="${kind}" data-how="${r.how}"><div class="panel" role="dialog" aria-label="Game over: ${kind} by ${r.how}"><div class="big ${kind}" title="${kind} by ${r.how}">${ICON[kind]}</div><p class="endt"><b>${kind === 'win' ? 'You won' : kind === 'loss' ? 'You lost' : 'Draw'}</b><small>by ${r.how}</small></p></div></div>`);
   const rv = $(`<button class="next" title="Review game" aria-label="Review game">${ICON.review}<span>Review</span></button>`);
   rv.onclick = (e) => { e.stopPropagation(); reviewCurrent(); };
+  if (r.how === 'aborted') rv.hidden = true; // aborted games are not saved to history
   const ng = $(`<button class="act" title="New game" aria-label="New game">${ICON.newGame}<span>New</span></button>`);
   ng.onclick = (e) => { e.stopPropagation(); st.choosing = true; render(); };
   o.firstElementChild!.append(rv, ng);
@@ -529,6 +570,7 @@ function endOverlay() {
 function onSquare(sq: Square) {
   if (st.mode === 'review') return onExploreSquare(sq);
   if (st.mode !== 'play' || st.thinking || st.game.turn() !== st.player || st.promo || st.choosing || st.showHistory) return;
+  if (st.online && (!st.online.view?.you || !st.online.view.seats.w || !st.online.view.seats.b || st.online.status !== 'open')) return;
   if (checkFlag()) return;
   const p = st.game.get(sq);
   if (st.selected) {
@@ -544,7 +586,7 @@ function onSquare(sq: Square) {
 
 /** Applies the clock for a move by `mover`. Returns false (and ends the game) if the mover's flag already fell. */
 function clockMove(mover: Color): boolean {
-  if (!st.tc || !st.clock) return true;
+  if (st.online || !st.tc || !st.clock) return true;
   const r = press(st.clock, mover, Date.now());
   st.clock = r.clock;
   if (r.flagged) { st.flagged = mover; endGame(); return false; }
@@ -553,6 +595,7 @@ function clockMove(mover: Color): boolean {
 
 /** Ends the game if the side to move has run out of time. */
 function checkFlag(): boolean {
+  if (st.online) return false; // the server flags online games
   if (st.mode !== 'play' || !st.tc || !st.clock || st.flagged || result()) return false;
   const turn = st.game.turn();
   if (remaining(st.clock, turn, turn, Date.now()) > 0) return false;
@@ -562,6 +605,15 @@ function checkFlag(): boolean {
 }
 
 function playerMove(from: Square, to: Square, promotion?: string) {
+  if (st.online) {
+    // Optimistic: show the move now; the server's next full position confirms or replaces it.
+    const v = st.game.history().length;
+    const m = st.game.move({ from, to, promotion });
+    st.selected = null;
+    st.online.send({ t: 'move', uci: m.lan, v });
+    moveSound(m, st.game);
+    return render();
+  }
   if (!clockMove(st.player)) return;
   const m = st.game.move({ from, to, promotion });
   st.selected = null;
@@ -573,6 +625,7 @@ function playerMove(from: Square, to: Square, promotion?: string) {
 }
 
 async function botMove() {
+  if (st.online) return;
   if (st.mode !== 'play' || st.choosing || st.game.turn() === st.player || st.thinking) return;
   if (checkFlag()) return;
   st.thinking = true; render();
@@ -612,6 +665,7 @@ function endGame() {
 }
 
 function newGame(color: Color) {
+  leaveOnline();
   engine?.cancelAll();
   Object.assign(st, {
     game: new Chess(), id: newId(), player: color, mode: 'play', selected: null, promo: null, choosing: false, showHistory: false, thinking: false,
@@ -744,12 +798,11 @@ document.addEventListener('keydown', (e) => {
 
 // Clock ticker: updates only the clock text (full re-render would disturb taps) and flags expiry.
 setInterval(() => {
-  if (st.mode !== 'play' || !st.tc || !st.clock) return;
+  if (st.mode !== 'play' || !st.tc || !(st.clock || st.online)) return;
   if (checkFlag()) return;
-  const turn = st.game.turn();
   document.querySelectorAll<HTMLElement>('.clock').forEach((el) => {
     const side = el.dataset.side as Color;
-    const ms = remaining(st.clock!, side, turn, Date.now());
+    const ms = clockMs(side);
     el.querySelector('.t')!.textContent = fmtClock(ms);
     el.classList.toggle('low', ms < 10_000);
   });
@@ -760,13 +813,118 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) chec
 (window as any).__chess = {
   fen: () => st.game.fen(), moves: () => st.game.history(), mode: () => st.mode, review: () => st.review,
   clock: () => (st.clock ? { w: remaining(st.clock, 'w', st.game.turn(), Date.now()), b: remaining(st.clock, 'b', st.game.turn(), Date.now()) } : null),
+  online: () => (st.online ? { status: st.online.status, view: st.online.view, room: st.online.room } : null), dropSocket: () => st.online?.drop(),
   result: () => result(), sound: () => soundState(), history: () => loadHistory(), shownFen: () => shownPosition().pos.fen(), exEval: () => st.exEval, feedbackStats: () => ({ ...feedbackStats }),
 };
 
 // Unlock audio on the first deliberate interactions (autoplay policies, iOS needs a touch/click).
 for (const ev of ['pointerdown', 'touchend', 'click', 'keydown']) document.addEventListener(ev, () => { if (!soundState().unlocked) unlockAudio(); }, { capture: true, passive: true });
 
-load();
-if (!localStorage.getItem(STORE)) st.choosing = true;
+const bootRoom = roomFromHash();
+if (bootRoom) enterRoom(bootRoom);
+else {
+  load();
+  if (!localStorage.getItem(STORE)) st.choosing = true;
+}
 render();
+addEventListener('hashchange', () => { const r = roomFromHash(); if (r && r !== st.online?.room) enterRoom(r); });
 getEngine().whenReady().then(() => { if (!checkFlag()) botMove(); }).catch((e) => console.error('engine failed', e));
+
+// ---- invite-link games ---------------------------------------------------------------------------
+
+async function newOnlineGame(tc: number, side: Color) {
+  st.onlineErr = '';
+  try {
+    const room = await createRoom(tc, side);
+    history.replaceState(null, '', `#room=${room}`);
+    enterRoom(room);
+  } catch (e) {
+    st.onlineErr = (e as Error).message === 'rate' ? 'Too many new games. Wait a minute and try again.' : 'Could not create the game. Check your connection.';
+    render();
+  }
+}
+
+async function enterRoom(room: string) {
+  leaveOnline();
+  engine?.cancelAll();
+  Object.assign(st, {
+    game: new Chess(), id: `online-${room}`, player: 'w', mode: 'play', selected: null, promo: null, choosing: false, showHistory: false, thinking: false,
+    resigned: null, flagged: null, tc: null, clock: null, rec: null, review: null, evals: null, progress: 0, idx: -1, explore: null, exEval: null, onlineErr: '',
+  });
+  render();
+  try {
+    if (!seatFor(room)) await joinRoom(room);
+  } catch (e) {
+    st.onlineErr = (e as Error).message === 'no room' ? 'This game link has expired or does not exist.' : (e as Error).message === 'rate' ? 'Too many attempts. Wait a minute and try again.' : 'Could not join the game. Check your connection.';
+    st.choosing = true; history.replaceState(null, '', location.pathname); render();
+    return;
+  }
+  st.online = new Connection(room, syncOnline);
+}
+
+function leaveOnline() {
+  if (!st.online) return;
+  st.online.close(); st.online = null;
+  if (roomFromHash()) history.replaceState(null, '', location.pathname);
+}
+
+/** Applies the server's full position. Local optimistic moves are replaced whenever they disagree. */
+function syncOnline() {
+  const o = st.online; if (!o) return;
+  if (o.status === 'gone' && !o.view?.result) { leaveOnline(); st.onlineErr = 'This game has expired.'; st.choosing = true; return render(); }
+  const v = o.view;
+  if (v) {
+    const before = lans(st.game);
+    const wasOver = st.mode === 'over';
+    if (before.join() !== v.moves.join()) {
+      const g = new Chess();
+      let last: Move | null = null;
+      for (const m of v.moves) last = g.move(uciToMove(m));
+      // Sound only for a new opponent move; our own move already played its sound optimistically.
+      const extendsLocal = v.moves.length === before.length + 1 && before.every((m, i) => m === v.moves[i]);
+      if (extendsLocal && last) moveSound(last, g);
+      st.game = g; st.selected = null; st.promo = null;
+    }
+    st.player = v.you ?? 'w'; st.tc = v.tc;
+    if (v.result && !wasOver && st.mode !== 'review') {
+      st.mode = 'over'; st.selected = null; st.promo = null;
+      if (v.you && v.result.how !== 'aborted') archiveCurrent();
+      play(v.result.winner === null ? 'draw' : v.result.winner === v.you ? 'win' : 'loss');
+    }
+  }
+  if (st.mode !== 'review') render();
+}
+
+function onlineStatus(): string {
+  const o = st.online!, v = o.view;
+  if (o.status === 'reconnecting') return 'Connection lost. Reconnecting…';
+  if (!v) return 'Connecting…';
+  const r = v.result;
+  if (r) return r.how === 'aborted' ? 'Game aborted.' : r.winner ? `${v.you ? (r.winner === v.you ? 'You win' : 'Opponent wins') : `${colorName(r.winner)} wins`} by ${r.how}.` : `Draw by ${r.how}.`;
+  if (!v.you) return `Watching. ${colorName(st.game.turn())} to move.`;
+  if (!v.seats.w || !v.seats.b) return 'Waiting for your friend to open the invite link…';
+  if (st.game.turn() === v.you) return st.game.inCheck() ? 'Check! Your move.' : st.game.history().length ? 'Your move.' : `You play ${colorName(v.you)}. Your move.`;
+  return 'Opponent to move.';
+}
+
+async function shareInvite() {
+  const url = inviteUrl(st.online!.room);
+  try {
+    if (navigator.share && matchMedia('(pointer: coarse)').matches) await navigator.share({ title: 'Play chess with me', url });
+    else { await navigator.clipboard.writeText(url); st.onlineErr = 'Invite link copied.'; render(); }
+  } catch { /* user dismissed the share sheet */ }
+}
+
+/** While the second seat is empty: the invite link, ready to copy or share. */
+function onlineOverlay() {
+  const v = st.online!.view;
+  if (!v || !v.you || (v.seats.w && v.seats.b)) return null;
+  const url = inviteUrl(st.online!.room);
+  const o = $(`<div class="overlay"><div class="panel choose col invite" role="dialog" aria-label="Invite a friend"><h2>Invite a friend</h2><p class="note">Send this link. The first person to open it plays ${colorName(v.you === 'w' ? 'b' : 'w')}.</p><input class="link" readonly aria-label="Invite link" value="${esc(url)}"/></div></div>`);
+  const b = $(`<button class="next" aria-label="Share invite link">${ICON.share}<span>${'share' in navigator ? 'Share link' : 'Copy link'}</span></button>`);
+  b.onclick = (e) => { e.stopPropagation(); shareInvite(); };
+  o.firstElementChild!.append(b);
+  if (st.onlineErr) o.firstElementChild!.append($(`<p class="note" role="status">${esc(st.onlineErr)}</p>`));
+  o.querySelector('input')!.addEventListener('click', (e) => { e.stopPropagation(); (e.target as HTMLInputElement).select(); });
+  return o;
+}

@@ -1,0 +1,17 @@
+// Local-only test config (compat date pinned to the newest the local workerd binary supports): same Worker + Durable Object, no custom domain and no AI binding (AI needs a
+// logged-in remote session). Rate limits are generous so automated tests are not throttled; the abuse test
+// uses RL_ROOM's real limit via a dedicated key. Never deploy this file.
+{
+  "name": "chess-mp-local",
+  "main": "worker/entry.ts",
+  "compatibility_date": "2026-10-13",
+  "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
+  "ratelimits": [
+    { "name": "RL_IP", "namespace_id": "1", "simple": { "limit": 12, "period": 60 } },
+    { "name": "RL_GLOBAL", "namespace_id": "2", "simple": { "limit": 16, "period": 60 } },
+    { "name": "RL_ROOM", "namespace_id": "3", "simple": { "limit": 10, "period": 60 } },
+    { "name": "RL_WS", "namespace_id": "4", "simple": { "limit": 600, "period": 60 } }
+  ],
+  "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "ChessRoom" }] },
+  "migrations": [{ "tag": "v1-rooms", "new_sqlite_classes": ["ChessRoom"] }]
+}

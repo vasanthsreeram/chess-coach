@@ -1,7 +1,7 @@
 # Chess
 
 A small chess app with timed games, a browser-based Stockfish opponent, game
-history, and move-by-move analysis. Original application code is MIT licensed.
+history, invite-link games with another player, and move-by-move analysis. Original application code is MIT licensed.
 The bundled Stockfish engine is separately GPL-3.0 licensed; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
@@ -21,6 +21,13 @@ Install the deployment dependencies with `cd deploy && npm install`, then set
 your own Cloudflare Worker name, domain, and bindings before deploying.
 Hosting and AI use may incur costs to the operator even if access is free to
 players.
+
+Invite-link games are casual and do not require accounts. The invitation link
+allows someone to join the available seat or watch once both seats are taken;
+share it only with people you want in the game. The server stores a room's
+moves, clocks and hashed seat tokens temporarily; finished rooms expire after
+one hour. Players' game history and seat tokens are stored in their browsers.
+Cloudflare uses connection information for request handling and rate limits.
 
 ## Chess.com imports
 

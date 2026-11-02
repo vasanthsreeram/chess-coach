@@ -1,13 +1,19 @@
 // Reference Wrangler config (equivalent to cloudflare.config.ts). Used for local `wrangler dev`.
 {
   "name": "chess-vasanth",
-  "main": "worker/index.ts",
+  "main": "worker/entry.ts",
   "compatibility_date": "2026-11-02",
   "routes": [{ "pattern": "chess.vasanth.cloud", "custom_domain": true }],
   "assets": { "directory": "./dist", "binding": "ASSETS", "run_worker_first": ["/api/*"] },
   "ai": { "binding": "AI" },
   "ratelimits": [
     { "name": "RL_IP", "namespace_id": "1793608201", "simple": { "limit": 12, "period": 60 } },
-    { "name": "RL_GLOBAL", "namespace_id": "1793608202", "simple": { "limit": 16, "period": 60 } }
-  ]
+    { "name": "RL_GLOBAL", "namespace_id": "1793608202", "simple": { "limit": 16, "period": 60 } },
+    // Multiplayer: own namespaces so rooms never consume the AI feedback budget (keys: create:<ip>, join:<ip>).
+    { "name": "RL_ROOM", "namespace_id": "1793608203", "simple": { "limit": 10, "period": 60 } },
+    { "name": "RL_WS", "namespace_id": "1793608204", "simple": { "limit": 60, "period": 60 } }
+  ],
+  // One SQLite-backed Durable Object per invite room (SQLite backend is required on the Workers Free plan).
+  "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "ChessRoom" }] },
+  "migrations": [{ "tag": "v1-rooms", "new_sqlite_classes": ["ChessRoom"] }]
 }

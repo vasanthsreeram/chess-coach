@@ -1,5 +1,6 @@
 // Cloudflare Worker: static assets plus POST /api/feedback, which phrases server-computed chess facts
 // with DeepSeek V4.1 Flash on Workers AI. The model never sees user text and its output is validated.
+import { randomToken } from './tokens';
 import { buildFeedback, defaultPick, RESPONSE_SCHEMA, sanitizeInput, SYSTEM_PROMPT, userPrompt, validateModelOutput, FEEDBACK_VERSION } from '../src/facts';
 
 export const MODEL = '@cf/deepseek-ai/deepseek-v4.1-flash-1017';
@@ -12,6 +13,10 @@ export interface Env {
   AI: { run(model: string, input: unknown, opts?: unknown): Promise<any> };
   RL_IP: RateLimit;
   RL_GLOBAL: RateLimit;
+  /** Multiplayer only; separate namespaces so room traffic never consumes the feedback (AI) budget. */
+  ROOMS?: DurableObjectNamespace;
+  RL_ROOM?: RateLimit;
+  RL_WS?: RateLimit;
 }
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), {
@@ -69,10 +74,48 @@ export async function handleFeedback(req: Request, env: Env): Promise<Response> 
   return json(200, { v: FEEDBACK_VERSION, model: items ? MODEL : null, items: items ?? defaultPick(fb) });
 }
 
+const ROOM_ID = /^[A-Za-z0-9_-]{22}$/;
+const ROOM_PATH = /^\/api\/rooms\/([^/]+)\/(join|ws)$/;
+
+/**
+ * POST /api/rooms {tc, side}      -> {room, token, side, tc}   (creates an invite room)
+ * POST /api/rooms/:room/join      -> {token, side, tc}         (claims the free seat)
+ * GET  /api/rooms/:room/ws        -> WebSocket; first frame {t:'hello', token?}. No token = read-only spectator.
+ * Seat tokens only travel in JSON bodies and WebSocket frames, never in URLs, so request logs cannot leak them.
+ */
+export async function handleRooms(req: Request, env: Env, url: URL): Promise<Response> {
+  if (!env.ROOMS || !env.RL_ROOM || !env.RL_WS) return json(503, { error: 'multiplayer disabled' });
+  if (!sameOrigin(req)) return json(403, { error: 'origin' });
+  const ip = req.headers.get('cf-connecting-ip') ?? 'unknown';
+  if (url.pathname === '/api/rooms') {
+    if (req.method !== 'POST') return json(405, { error: 'method' });
+    if (!(req.headers.get('content-type') ?? '').startsWith('application/json')) return json(415, { error: 'type' });
+    const text = await req.text();
+    if (text.length > 128) return json(413, { error: 'size' });
+    if (!(await env.RL_ROOM.limit({ key: `create:${ip}` })).success) return json(429, { error: 'rate' });
+    const room = randomToken(16); // 128 bits: the invite link is the capability to take the free seat
+    const r = await env.ROOMS.get(env.ROOMS.idFromName(room)).fetch('https://room/create', { method: 'POST', body: text });
+    if (r.status !== 201) return r;
+    return json(201, { room, ...(await r.json() as object) });
+  }
+  const m = ROOM_PATH.exec(url.pathname);
+  if (!m || !ROOM_ID.test(m[1])) return json(404, { error: 'not found' });
+  const stub = env.ROOMS.get(env.ROOMS.idFromName(m[1]));
+  if (m[2] === 'join') {
+    if (req.method !== 'POST') return json(405, { error: 'method' });
+    if (!(await env.RL_ROOM.limit({ key: `join:${ip}` })).success) return json(429, { error: 'rate' });
+    return stub.fetch('https://room/join', { method: 'POST' });
+  }
+  if (req.headers.get('upgrade') !== 'websocket') return json(426, { error: 'upgrade' });
+  if (!(await env.RL_WS.limit({ key: ip })).success) return json(429, { error: 'rate' });
+  return stub.fetch('https://room/ws', { headers: { upgrade: 'websocket' } });
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === '/api/feedback') return handleFeedback(req, env);
+    if (url.pathname === '/api/rooms' || url.pathname.startsWith('/api/rooms/')) return handleRooms(req, env, url);
     if (url.pathname.startsWith('/api/')) return json(404, { error: 'not found' });
     return env.ASSETS.fetch(req);
   },

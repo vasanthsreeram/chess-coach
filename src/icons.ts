@@ -11,6 +11,7 @@ export const ICON = {
   last: svg(`<path ${s} d="M18 5v14M6 6l7 6-7 6"/>`),
   review: svg(`<circle ${s} cx="10.5" cy="10.5" r="6"/><path ${s} d="M15 15l5 5"/>`),
   history: svg(`<path ${s} d="M4 12a8 8 0 1 0 2.4-5.7M4 5v4h4M12 8v4l3 2"/>`),
+  share: svg(`<path ${s} d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>`),
   ret: svg(`<path ${s} d="M9 14l-5-5 5-5M4 9h10a6 6 0 0 1 0 12h-3"/>`),
   close: svg(`<path ${s} d="M6 6l12 12M18 6L6 18"/>`),
   back: svg(`<path ${s} d="M19 12H5m0 0l6-6m-6 6l6 6"/>`),
