@@ -1,5 +1,5 @@
 * { box-sizing: border-box; }
-:root { --shell: #2b2926; --panel: #3b3835; --panel-2: #4a4643; --text: #f1efea; --muted: #a8a39c; --light: #ebecd0; --dark: #779556; --green: #81b64c; --green-edge: #45753c; }
+:root { --shell: #18252a; --panel: #283b40; --panel-2: #395157; --text: #f3f2eb; --muted: #a9bcbd; --light: #f0e9d8; --dark: #668b91; --green: #418c9a; --green-edge: #28616b; }
 html, body { margin: 0; min-height: 100%; background: var(--shell); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
 #app { min-height: 100svh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: max(6px, env(safe-area-inset-top)) 0 max(8px, env(safe-area-inset-bottom)); }
 button { font: inherit; }
@@ -33,7 +33,7 @@ button.icon svg, a.icon svg { width: 100%; height: 100%; }
 .sq.last::after, .sq.sel::after, .sq[class*=" q-"]::after { content: ''; position: absolute; inset: 0; }
 .sq.last::after { background: rgba(255, 255, 51, .42); }
 .sq.sel::after { background: rgba(255, 255, 51, .55); }
-.sq.q-best::after { background: rgba(129, 182, 76, .6); }
+.sq.q-best::after { background: rgba(65, 140, 154, .6); }
 .sq.q-good::after { background: rgba(149, 175, 138, .55); }
 .sq.q-inaccuracy::after { background: rgba(247, 199, 72, .6); }
 .sq.q-mistake::after { background: rgba(255, 164, 89, .6); }
@@ -158,7 +158,7 @@ button.icon svg, a.icon svg { width: 100%; height: 100%; }
   .thinking.on::after { margin-left: 30%; }
 }
 .explain .links { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 6px 0 0; }
-.explain .lnk { border: 0; background: #eef5e6; color: #3d6b1c; border-radius: 6px; padding: 4px 8px; font-size: 13px; font-weight: 700; cursor: pointer; min-height: 30px; }
+.explain .lnk { border: 0; background: #e2f1f1; color: #235f68; border-radius: 6px; padding: 4px 8px; font-size: 13px; font-weight: 700; cursor: pointer; min-height: 30px; }
 .explain .lnk:hover { filter: brightness(.96); }
 .explain .src { font-size: 11px; color: #85807a; margin-left: auto; }
 .explain .f-threat { color: #a3261f; }

@@ -203,7 +203,7 @@ function render() {
   if (reviewing) {
     const back = $(`<button class="icon flat" title="Close review" aria-label="Close review">${ICON.back}</button>`);
     back.onclick = closeReview;
-    top.append(back, $(`<h1>Game Review</h1>`), soundBtn(), sourceLink());
+    top.append(back, $(`<h1>Move analysis</h1>`), soundBtn(), sourceLink());
   } else {
     const newBtn = $(`<button class="icon" title="New game" aria-label="New game">${ICON.newGame}</button>`);
     newBtn.onclick = () => { st.choosing = true; st.showHistory = false; render(); };
@@ -237,7 +237,6 @@ function render() {
     const ahead = pct >= 50 ? 'w' : 'b';
     wrap.append($(`<div class="evalbar" role="meter" aria-label="Evaluation ${label}, White win chance ${Math.round(pct)} percent" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><div class="w" style="width:${pct}%"></div><span class="lbl ${ahead}">${label}</span></div>`));
   }
-  if (reviewing && st.review) wrap.append(coachCard(pos));
 
   const showClocks = !reviewing && st.tc && st.clock;
   if (showClocks) { wrap.classList.add('clocked'); wrap.append(clockEl(st.player === 'w' ? 'b' : 'w')); }
@@ -254,7 +253,7 @@ function render() {
     const to = rev.uci.slice(2, 4);
     addMark(to, `q-${rev.quality}`);
     addBadge(to, ICON[rev.quality], `${rev.san}: ${rev.quality}`);
-    if (st.showBest && rev.best && rev.best !== rev.uci) arrows += arrow(rev.best, '#81b64c', flip, 0.2);
+    if (st.showBest && rev.best && rev.best !== rev.uci) arrows += arrow(rev.best, '#418c9a', flip, 0.2);
     arrows += arrow(rev.uci, QUALITY_COLOR[rev.quality], flip, 0.14);
     for (const m of rev.motifs) {
       if (m.kind === 'fork') {
@@ -274,7 +273,7 @@ function render() {
       }
     }
   }
-  if (reviewing && st.showBest && st.explore && st.exEval?.fen === pos.fen() && st.exEval.e.best) arrows += arrow(st.exEval.e.best, '#81b64c', flip, 0.2);
+  if (reviewing && st.showBest && st.explore && st.exEval?.fen === pos.fen() && st.exEval.e.best) arrows += arrow(st.exEval.e.best, '#418c9a', flip, 0.2);
   const canExplore = reviewing && !!st.review;
   const legal = st.selected && (st.mode === 'play' || canExplore) ? pos.moves({ square: st.selected, verbose: true }) : [];
   for (let r = 0; r < 8; r++) for (let f = 0; f < 8; f++) {
@@ -300,6 +299,7 @@ function render() {
   else if (st.choosing) board.append(chooseOverlay());
   else if (st.mode === 'over') board.append(endOverlay());
   wrap.append(board);
+  if (reviewing && st.review) wrap.append(coachCard(pos));
   if (showClocks) wrap.append(clockEl(st.player));
   if (!reviewing) wrap.append($(`<p class="status" aria-live="polite">${esc(statusText())}</p>`));
 
