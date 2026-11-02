@@ -17,7 +17,8 @@ provides a feedback endpoint for the interface; production feedback runs as a
 Cloudflare Worker and needs a Workers AI binding.
 
 The deployment configuration is an example for the original installation.
-Set your own Cloudflare Worker name, domain, and bindings before deploying.
+Install the deployment dependencies with `cd deploy && npm install`, then set
+your own Cloudflare Worker name, domain, and bindings before deploying.
 Hosting and AI use may incur costs to the operator even if access is free to
 players.
 

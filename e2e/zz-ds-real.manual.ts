@@ -20,6 +20,6 @@ for (const [name, g] of Object.entries(games)) test(`real DS ${name}`, async ({ 
     const txt = await page.locator('.explain').innerText();
     const docH = await page.evaluate(() => document.documentElement.scrollHeight);
     console.log(`=== ${name} ply ${i} status=${res?.status()} model=${body?.model} docH=${docH}\n--- deterministic:\n${det}\n--- shown:\n${txt}`);
-    await page.screenshot({ path: `/home/vasanth/Master/coordination/2026-11-02-chess-feedback/build/evidence/ds-${name}-ply${i}.png` });
+    await page.screenshot({ path: `test-results/ds-${name}-ply${i}.png` });
   }
 });
